@@ -54,7 +54,7 @@ To run the full backend server with real-time SSE streams and batch Firestore wr
 node web/server.js
 ```
 
-The portal connects by default to `http://localhost:3000`. You can also configure a custom cloud server endpoint directly from the **Settings** modal in the web interface.
+The portal connects by default to `https://loan-management-9f8e2.web.app` (or local `http://localhost:3000`). You can also configure a custom cloud server endpoint directly from the **Settings** modal in the web interface.
 
 ---
 

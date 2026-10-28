@@ -91,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ----------------------------------------------------
   function getDefaultApiBase() {
     if (window.location.hostname.endsWith('github.io')) {
-      return localStorage.getItem('kptcl_backend_url') || 'http://localhost:3000';
+      return localStorage.getItem('kptcl_backend_url') || 'https://loan-management-9f8e2.web.app';
     }
     return localStorage.getItem('kptcl_backend_url') || '';
   }
