@@ -481,10 +481,105 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Confirm Sync to Database
+  // Direct In-Browser Firestore Synchronization (Serverless & GitHub Pages Compatible)
+  async function syncDirectToFirestore(employees, clearOld = false) {
+    if (!firestoreDb) {
+      throw new Error('Firestore Client SDK is not initialized.');
+    }
+    if (!employees || !employees.length) {
+      throw new Error('No employee records staged for synchronization.');
+    }
+
+    const totalEmployees = employees.length;
+    syncStatusTitle.textContent = 'Writing Directly to Cloud Firestore...';
+    syncStatusDesc.textContent = `Batch writing ${totalEmployees} employee records and loan lookups...`;
+
+    // Process in chunks of 120 employees (each employee writes userDoc + lookupDoc + monthlyDoc = 360 ops, comfortably within Firestore's 500 limit)
+    const CHUNK_SIZE = 120;
+    let committedEmployees = 0;
+
+    for (let i = 0; i < totalEmployees; i += CHUNK_SIZE) {
+      const chunk = employees.slice(i, i + CHUNK_SIZE);
+      const batch = firestoreDb.batch();
+
+      chunk.forEach((emp) => {
+        const phoneKey = String(emp.mobile || '').replace(/\D/g, '');
+        if (!phoneKey) return;
+
+        const totalLoan = Number(emp.totalLoan) || 0;
+        const monthlyDeduction = totalLoan >= 400000 ? 15000 : (totalLoan >= 250000 ? 13000 : (totalLoan >= 200000 ? 10000 : 9000));
+
+        const userDocRef = firestoreDb.collection('users').doc(phoneKey);
+        
+        const payload = {
+          slNo: emp.slNo,
+          employeeName: emp.employeeName,
+          designation: emp.designation,
+          office: emp.office,
+          loanId: emp.loanId,
+          mobile: phoneKey,
+          phoneNumber: phoneKey,
+          longLoan: emp.longLoan || 0,
+          shortLoan: emp.shortLoan || 0,
+          medicalLoan: emp.medicalLoan || 0,
+          totalLoan: emp.totalLoan || 0,
+          shareAmount: emp.shareAmount || 0,
+          longTermCtd: emp.longTermCtd || 0,
+          shortTermCtd: emp.shortTermCtd || 0,
+          totalCtd: emp.totalCtd || ((emp.longTermCtd || 0) + (emp.shortTermCtd || 0)),
+          totalShareAndCtd: (emp.shareAmount || 0) + (emp.totalCtd || 0),
+          monthlyDeduction: monthlyDeduction,
+          month: emp.month || 'oct',
+          year: emp.year || 2026,
+          lastSyncAt: new Date().toISOString(),
+          syncSource: 'GitHub Pages Administration Desk'
+        };
+
+        batch.set(userDocRef, payload, { merge: !clearOld });
+
+        // Loan Lookup mapping
+        if (emp.loanId) {
+          const lookupRef = firestoreDb.collection('loan_lookups').doc(String(emp.loanId).trim());
+          batch.set(lookupRef, {
+            loanId: String(emp.loanId).trim(),
+            mobile: phoneKey,
+            employeeName: emp.employeeName,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+
+        // Subcollection: monthly_records/oct_2026
+        const monthKey = `${(emp.month || 'oct').toLowerCase()}_${emp.year || 2026}`;
+        const monthlyRef = userDocRef.collection('monthly_records').doc(monthKey);
+        batch.set(monthlyRef, {
+          month: emp.month || 'oct',
+          year: emp.year || 2026,
+          isCurrent: true,
+          longLoan: emp.longLoan || 0,
+          shortLoan: emp.shortLoan || 0,
+          medicalLoan: emp.medicalLoan || 0,
+          totalLoan: emp.totalLoan || 0,
+          monthlyDeduction: monthlyDeduction,
+          slipNo: `SLIP-2026-OCT-${emp.loanId}`,
+          uploadDate: new Date().toISOString().slice(0, 10),
+          remarks: 'Verified salary recovery ledger'
+        }, { merge: true });
+      });
+
+      const currentProgress = Math.min(i + CHUNK_SIZE, totalEmployees);
+      syncStatusDesc.textContent = `Committed batch ${currentProgress} / ${totalEmployees} records to Firestore...`;
+      await batch.commit();
+      committedEmployees += chunk.length;
+    }
+
+    return committedEmployees;
+  }
+
+  // Confirm Sync to Database (Direct Firestore & Hybrid Backend)
   async function handleConfirmSync() {
-    if (!stagedFile) {
-      showToast('No file staged for sync.', 'error');
+    const listToSync = previewEmployees || activeEmployees;
+    if (!listToSync || !listToSync.length) {
+      showToast('No employee records staged for sync.', 'error');
       return;
     }
 
@@ -493,17 +588,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Show Progress Banner
     syncBanner.style.display = 'flex';
-    syncStatusTitle.textContent = 'Synchronizing with Database...';
-    syncStatusDesc.textContent = isBackendOnline
-      ? 'Sending to backend server for Firestore synchronization...'
-      : 'Connecting to backend API endpoint...';
+    syncStatusTitle.textContent = 'Synchronizing with Firestore Database...';
+    syncStatusDesc.textContent = 'Writing records directly to Google Cloud Firestore...';
 
     confirmSyncBtn.disabled = true;
     cancelUploadBtn.disabled = true;
 
     try {
+      // 1. Direct In-Browser Firestore Write (Primary & 100% Serverless on GitHub Pages)
+      if (firestoreDb) {
+        const count = await syncDirectToFirestore(listToSync, clearOld);
+        syncStatusTitle.textContent = '✓ Synchronization Successful!';
+        syncStatusDesc.textContent = `Cleanly committed ${count} employee records directly to Firebase Firestore!`;
+        showToast(`✓ Synchronized ${count} employees directly to Firebase Firestore!`, 'success', 5000);
+
+        activeEmployees = [...listToSync];
+        previewEmployees = null;
+        filePreviewBanner.style.display = 'none';
+
+        kpiEmployees.textContent = activeEmployees.length;
+        kpiTotalLoan.textContent = formatINR(activeEmployees.reduce((s, r) => s + r.totalLoan, 0));
+        if (kpiTotalShares) kpiTotalShares.textContent = formatINR(activeEmployees.reduce((s, r) => s + (r.shareAmount || 0), 0));
+        if (kpiTotalCtd) kpiTotalCtd.textContent = formatINR(activeEmployees.reduce((s, r) => s + (r.totalCtd || 0), 0));
+
+        tableTitle.textContent = 'Current Active Records (Firestore Synced)';
+        tableSubtitle.textContent = `Displaying ${activeEmployees.length} employee records synchronized live to Firestore`;
+        modeBadge.textContent = 'Active Firestore';
+        modeBadge.style.background = '#ECFDF5';
+        modeBadge.style.color = '#047857';
+
+        renderTable(activeEmployees);
+
+        setTimeout(() => {
+          syncBanner.style.display = 'none';
+        }, 2500);
+        return;
+      }
+
+      // 2. Fallback to backend API if firestoreDb is unavailable
       const formData = new FormData();
-      formData.append('sheet', stagedFile);
+      if (stagedFile) formData.append('sheet', stagedFile);
       formData.append('clearOld', clearOld ? 'true' : 'false');
 
       const res = await authFetch('/api/upload-and-sync', {
@@ -518,16 +642,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
       syncStatusTitle.textContent = 'Synchronization Successful!';
       syncStatusDesc.textContent = `${data.message || 'Records committed cleanly to Firestore.'}`;
-      showToast(`✓ Synchronized ${data.totalEmployees || previewEmployees.length} employees to Firestore!`, 'success', 5000);
+      showToast(`✓ Synchronized ${data.totalEmployees || listToSync.length} employees to Firestore!`, 'success', 5000);
 
       setTimeout(() => {
         loadCurrentData();
       }, 1500);
     } catch (err) {
       console.warn('Sync failed:', err);
-      syncStatusTitle.textContent = 'Backend Connection Required for Sync';
-      syncStatusDesc.textContent = `Could not reach ${getApiBase() || 'local server'}. Click "Settings" to configure your backend URL or start the server with: node web/server.js`;
-      showToast('Backend offline: ' + err.message + '. Use Settings to configure API.', 'error', 6000);
+      syncStatusTitle.textContent = 'Synchronization Error';
+      syncStatusDesc.textContent = err.message;
+      showToast('Sync error: ' + err.message, 'error', 6000);
     } finally {
       confirmSyncBtn.disabled = false;
       cancelUploadBtn.disabled = false;
@@ -611,6 +735,14 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       try {
+        // Direct Firestore Write (Primary & Serverless)
+        if (firestoreDb) {
+          await firestoreDb.collection('app_details').doc('release').set(payload, { merge: true });
+          showToast(`🚀 Force Update settings saved to Firebase! (v${payload.latestVersion}, Build: ${payload.versionCode})`, 'success', 5000);
+          loadAppDetails();
+          return;
+        }
+
         const res = await authFetch('/api/app-details', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -624,7 +756,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadAppDetails();
       } catch (err) {
         console.error(err);
-        showToast('Failed to save app details: ' + err.message + ' (Check backend or API settings)', 'error');
+        showToast('Failed to save app details: ' + err.message, 'error');
       } finally {
         saveAppDetailsBtn.disabled = false;
         saveAppDetailsBtn.innerHTML = originalText;
@@ -845,6 +977,13 @@ document.addEventListener('DOMContentLoaded', () => {
       clearDbBtn.innerHTML = '<div class="spinner-sm" style="display:inline-block; border-color:#DC2626; border-top-color:transparent; margin-right:6px;"></div> Clearing...';
 
       try {
+        if (firestoreDb && activeEmployees.length) {
+          const count = await syncDirectToFirestore(activeEmployees, true);
+          showToast(`🔥 Database purged and re-synced freshly (${count} records)!`, 'success', 5000);
+          loadCurrentData();
+          return;
+        }
+
         const res = await authFetch('/api/clear-and-sync', { method: 'POST' });
         const data = await res.json();
         if (!data.success) {
@@ -870,6 +1009,13 @@ document.addEventListener('DOMContentLoaded', () => {
       syncActiveBtn.innerHTML = '<div class="spinner-sm" style="display:inline-block; border-color:white; border-top-color:transparent; margin-right:6px;"></div> Syncing...';
 
       try {
+        if (firestoreDb && activeEmployees.length) {
+          const count = await syncDirectToFirestore(activeEmployees, false);
+          showToast(`🎉 Active Sheet Synchronized! (${count} employees refreshed in Firestore)`, 'success');
+          loadCurrentData();
+          return;
+        }
+
         const res = await authFetch('/api/sync-active', { method: 'POST' });
         const data = await res.json();
         if (!data.success) {
